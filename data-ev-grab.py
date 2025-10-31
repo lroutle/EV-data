@@ -14,10 +14,12 @@ import seaborn as sns
 sns.set(style='whitegrid', context='talk')
 outdir = 'ev_ice_charts'
 os.makedirs(outdir, exist_ok=True)
+data_dir = 'data'
+os.makedirs(data_dir, exist_ok=True)
 
 # --- Helper functions
 def save_csv(df, name):
-    path = os.path.join(outdir, name)
+    path = os.path.join(data_dir, name)
     df.to_csv(path, index=False)
     print('Saved', path)
 
@@ -46,55 +48,73 @@ def stacked_chart(df, region, props, kind='absolute'):
     plt.close()
 
 # --- 1) Pull Eurostat registrations by fuel type (public CSV)
-# Eurostat bulk download endpoint for table: quadro "vehicle registrations by fuel"
-# Prefer using eurostat package if installed; otherwise request CSV directly.
-try:
-    from eurostat import get_data_df
-    # Example table code (may change); use "road_eqr_new" or fetch by name if available
-    # Replace 'mot_park' or 'reg_passenger_cars' with the correct eurostat table id if needed
-    print("Eurostat package available; will attempt to fetch known table ids.")
-except Exception:
-    pass
+def download_eurostat_data():
+    """
+    Downloads and processes Eurostat vehicle registration data.
+    """
+    try:
+        from eurostat import get_data_df
+        df = get_data_df('road_eqr_carpda')
 
-# Recommended direct Eurostat CSV fetch (replace TABLE_ID with correct id):
-# Example:
-# eurostat_url = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/road_eqr_new?unit=NR&fuel=TOTAL&time=2015:2024&geo=EU27_2020"
-# r = requests.get(eurostat_url)
-# df_euro = pd.read_json(io.StringIO(r.text))  # parsing depends on endpoint format
+        # Reshape the data
+        id_vars = ['freq', 'unit', 'mot_nrg', 'geo\\TIME_PERIOD']
+        value_vars = [col for col in df.columns if col not in id_vars]
+        df = pd.melt(df, id_vars=id_vars, value_vars=value_vars, var_name='year', value_name='value')
 
-# --- 2) UK: DfT / GOV.UK Vehicle licensing statistics
-# GOV.UK provides XLSX/CSV files. Example download (manual step may be required if site layout changes).
-uk_gov_csv = "https://www.gov.uk/government/uploads/system/uploads/attachment_data/file/xxxx/vehicle-licensing-statistics.csv"
-# Note: placeholder. If GOV.UK link requires navigation, download the CSV manually and place in ./data/uk_reg.csv
+        # Rename columns and filter
+        df = df.rename(columns={'mot_nrg': 'fuel', 'geo\\TIME_PERIOD': 'country'})
+        df['year'] = df['year'].astype(int)
 
-# --- 3) US: EPA / BTS data
-# EPA Automotive Trends provides downloadable CSVs; BTS provides registration by fuel type.
-# Example BTS CSV: https://www.bts.gov/sites/bts.dot.gov/files/2024-xx/vehicle_registrations_by_type.csv
-# If direct link unavailable, download and place in ./data/us_reg.csv
+        # Map fuel types
+        fuel_mapping = {
+            'TOTAL': 'Total',
+            'BEV': 'BEV',
+            'PHEV': 'PHEV',
+            'HEV': 'HEV',
+            'ALT': 'Other',
+            'OTH': 'Other',
+            'PET': 'Petrol',
+            'DIESEL': 'Diesel',
+            'ELEC': 'BEV'
+        }
+        df['fuel'] = df['fuel'].map(fuel_mapping).fillna('Other')
 
-# --- 4) Japan: JAMA / MLIT or JADA
-# JAMA provides reports and possibly CSVs for registrations; if not, use CEIC / Statista (manual).
-# Place file as ./data/japan_reg.csv
+        # Aggregate by year and fuel type
+        df = df.groupby(['year', 'fuel'])['value'].sum().reset_index()
 
-# --- 5) Global BEV/PHEV consolidated series (OWID / EVVolumes)
-# Our World in Data maintains CSVs for EV sales: https://ourworldindata.org/grapher/ev-sales?tab=chart
-# OWID direct CSV example:
-owid_ev_url = "https://ourworldindata.org/grapher/ev-sales.csv"
-r = requests.get(owid_ev_url)
-if r.ok:
-    ev_owid = pd.read_csv(io.StringIO(r.text))
-    save_csv(ev_owid, 'owid_ev_sales_raw.csv')
-else:
-    print("Could not fetch OWID EV sales CSV; please download manually and place in data/")
+        # Pivot the table
+        df_pivot = df.pivot(index='year', columns='fuel', values='value').fillna(0).reset_index()
 
-# --- 6) Read local/manual files into harmonized dataframe
-# Expected files: data/eurostat_reg.csv, data/uk_reg.csv, data/us_reg.csv, data/japan_reg.csv, data/global_ev.csv
-data_dir = 'data'
+        # Save to CSV
+        save_csv(df_pivot, 'eurostat_reg.csv')
+
+    except Exception as e:
+        print(f"Could not download or process Eurostat data: {e}")
+
+download_eurostat_data()
+
+# --- 2) Global BEV/PHEV consolidated series (OWID / EVVolumes)
+def download_owid_data():
+    """
+    Downloads and processes OWID EV sales data.
+    """
+    try:
+        owid_ev_url = "https://ourworldindata.org/grapher/ev-sales.csv"
+        r = requests.get(owid_ev_url)
+        if r.ok:
+            ev_owid = pd.read_csv(io.StringIO(r.text))
+            save_csv(ev_owid, 'global_ev.csv')
+        else:
+            print("Could not fetch OWID EV sales CSV; please download manually and place in data/")
+
+    except Exception as e:
+        print(f"Could not download or process OWID data: {e}")
+
+download_owid_data()
+
+# --- 3) Read local/manual files into harmonized dataframe
 files_expected = {
     'EU': os.path.join(data_dir, 'eurostat_reg.csv'),
-    'UK': os.path.join(data_dir, 'uk_reg.csv'),
-    'US': os.path.join(data_dir, 'us_reg.csv'),
-    'Japan': os.path.join(data_dir, 'japan_reg.csv'),
     'Global_EV': os.path.join(data_dir, 'global_ev.csv'),
 }
 
@@ -117,6 +137,13 @@ def load_and_pivot(path, region_name):
                 break
     if 'value' not in df.columns and 'count' in df.columns:
         df = df.rename(columns={'count':'value'})
+
+    if 'fuel' not in df.columns:
+        # Reshape the data
+        id_vars = [col for col in df.columns if col.lower() in ['year', 'region', 'country', 'code', 'entity']]
+        value_vars = [col for col in df.columns if col.lower() not in ['year', 'region', 'country', 'code', 'entity']]
+        df = pd.melt(df, id_vars=id_vars, value_vars=value_vars, var_name='fuel', value_name='value')
+
     # Normalize fuel type names
     df['fuel_norm'] = df['fuel'].str.lower().str.replace('-', ' ').str.strip()
     # Map to the standard categories
@@ -151,14 +178,14 @@ if frames:
 else:
     print("No source files loaded. Please populate ./data/ with the source CSVs as described in the notebook.")
 
-# --- 7) Plotting for available regions
+# --- 4) Plotting for available regions
 props = ['BEV','PHEV','HEV','Petrol','Diesel','Other']
 regions_available = df_h['region'].unique().tolist() if 'df_h' in globals() else []
 for r in regions_available:
     stacked_chart(df_h, r, props, kind='absolute')
     stacked_chart(df_h, r, props, kind='share')
 
-# --- 8) EU and Global yearly summary tables (split percentages)
+# --- 5) EU and Global yearly summary tables (split percentages)
 if 'df_h' in globals():
     summary = df_h.groupby(['region','year'])[props].sum().reset_index()
     # Compute shares
