@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 from capability_logic import CapabilityAnalysis
 from capability_plots import create_six_pack
-import io
 
 st.set_page_config(page_title="Capability 6-Pack", layout="wide")
 
